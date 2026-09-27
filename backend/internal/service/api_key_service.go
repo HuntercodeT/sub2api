@@ -954,16 +954,12 @@ func (s *APIKeyService) SetAPIKeyPlatformUsageRepo(repo APIKeyPlatformUsageRepos
 	s.apiKeyPlatformUsageRepo = repo
 }
 
-// ListPlatformUsage 返回某个 key 各来源的子限额用量，供后台回显。
-// 仅所有者可读；未注入用量仓储时返回空列表。
-func (s *APIKeyService) ListPlatformUsage(ctx context.Context, id int64, userID int64) ([]APIKeyPlatformUsageRecord, error) {
-	_, ownerID, err := s.apiKeyRepo.GetKeyAndOwnerID(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("get api key: %w", err)
-	}
-	if ownerID != userID {
-		return nil, ErrInsufficientPerms
-	}
+// ListPlatformUsage 返回某个 key 各来源的子限额用量。
+//
+// 不做归属校验：调用方要么已经确认过该 key 属于当前用户（用户面板的详情接口），
+// 要么本次请求就是用这把 key 认证的（网关 /v1/usage）。
+// 未注入用量仓储时返回空列表。
+func (s *APIKeyService) ListPlatformUsage(ctx context.Context, id int64) ([]APIKeyPlatformUsageRecord, error) {
 	if s.apiKeyPlatformUsageRepo == nil {
 		return nil, nil
 	}

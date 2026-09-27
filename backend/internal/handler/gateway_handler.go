@@ -1718,6 +1718,11 @@ func (h *GatewayHandler) usageQuotaLimited(c *gin.Context, ctx context.Context, 
 		}
 	}
 
+	// 按上游来源细分的子限额（与 key 级限额同时生效，任一触顶即拒绝）
+	if platformLimits := h.usagePlatformLimits(ctx, apiKey); len(platformLimits) > 0 {
+		resp["platform_limits"] = platformLimits
+	}
+
 	// 过期时间
 	if apiKey.ExpiresAt != nil {
 		resp["expires_at"] = apiKey.ExpiresAt
@@ -1765,6 +1770,11 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 			}
 		}
 
+		// 子限额在订阅模式下同样生效，这里一并回给自助查询页面
+		if platformLimits := h.usagePlatformLimits(ctx, apiKey); len(platformLimits) > 0 {
+			resp["platform_limits"] = platformLimits
+		}
+
 		if usageData != nil {
 			resp["usage"] = usageData
 		}
@@ -1793,6 +1803,9 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 		"unit":      "USD",
 		"balance":   latestUser.Balance,
 	}
+	if platformLimits := h.usagePlatformLimits(ctx, apiKey); len(platformLimits) > 0 {
+		resp["platform_limits"] = platformLimits
+	}
 	if usageData != nil {
 		resp["usage"] = usageData
 	}
@@ -1803,6 +1816,79 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 		resp["model_stats"] = modelStats
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// usagePlatformLimits 组装 /v1/usage 里「按来源限额」的部分。
+//
+// 三种计费模式都会调用：来源级子限额与 key 级 rate limit 一样，不区分余额/订阅模式。
+// 只有配置了 platform_limits 的 key 才会查用量；用量行缺失（该来源还没消费过）
+// 按 0 展示，而不是把这条来源藏起来 —— 限额存在这件事本身要看得见。
+func (h *GatewayHandler) usagePlatformLimits(ctx context.Context, apiKey *service.APIKey) []gin.H {
+	if apiKey == nil || !apiKey.HasPlatformLimits() || h.apiKeyService == nil {
+		return nil
+	}
+	rows, err := h.apiKeyService.ListPlatformUsage(ctx, apiKey.ID)
+	if err != nil {
+		return nil
+	}
+	usageByPlatform := make(map[string]service.APIKeyPlatformUsageRecord, len(rows))
+	for _, row := range rows {
+		usageByPlatform[row.Platform] = row
+	}
+
+	var out []gin.H
+	// 按 AllowedQuotaPlatforms 的顺序输出，保证同一把 key 每次查询顺序一致。
+	for _, platform := range service.AllowedQuotaPlatforms {
+		limit, ok := apiKey.PlatformLimit(platform)
+		if !ok {
+			continue
+		}
+		usage := usageByPlatform[platform]
+		usage5h, usage1d, usage7d := usage.EffectiveUsage()
+
+		entry := gin.H{"platform": platform}
+		if limit.Quota > 0 {
+			entry["quota"] = gin.H{
+				"limit":     limit.Quota,
+				"used":      usage.QuotaUsed,
+				"remaining": max(0, limit.Quota-usage.QuotaUsed),
+				"unit":      "USD",
+			}
+		}
+		var rateLimits []gin.H
+		windows := []struct {
+			name        string
+			limit       float64
+			used        float64
+			windowStart *time.Time
+			duration    time.Duration
+		}{
+			{"5h", limit.RateLimit5h, usage5h, usage.Window5hStart, service.RateLimitWindow5h},
+			{"1d", limit.RateLimit1d, usage1d, usage.Window1dStart, service.RateLimitWindow1d},
+			{"7d", limit.RateLimit7d, usage7d, usage.Window7dStart, service.RateLimitWindow7d},
+		}
+		for _, w := range windows {
+			if w.limit <= 0 {
+				continue
+			}
+			item := gin.H{
+				"window":       w.name,
+				"limit":        w.limit,
+				"used":         w.used,
+				"remaining":    max(0, w.limit-w.used),
+				"window_start": w.windowStart,
+			}
+			if w.windowStart != nil && !service.IsWindowExpired(w.windowStart, w.duration) {
+				item["reset_at"] = w.windowStart.Add(w.duration)
+			}
+			rateLimits = append(rateLimits, item)
+		}
+		if len(rateLimits) > 0 {
+			entry["rate_limits"] = rateLimits
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // calculateSubscriptionRemaining 计算订阅剩余可用额度

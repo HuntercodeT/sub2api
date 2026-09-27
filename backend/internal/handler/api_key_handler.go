@@ -184,7 +184,7 @@ func (h *APIKeyHandler) GetByID(c *gin.Context) {
 	out := dto.APIKeyFromService(key)
 	// 详情接口附带各来源的子限额用量；查询失败不影响主体返回。
 	if key.HasPlatformLimits() {
-		if rows, usageErr := h.apiKeyService.ListPlatformUsage(c.Request.Context(), keyID, subject.UserID); usageErr == nil {
+		if rows, usageErr := h.apiKeyService.ListPlatformUsage(c.Request.Context(), keyID); usageErr == nil {
 			out.PlatformUsages = dto.APIKeyPlatformUsagesFromService(rows)
 		}
 	}
